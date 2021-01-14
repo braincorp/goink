@@ -1,6 +1,6 @@
 # goink
 Golang Incremental Testing Library
-![Goink Logo](goink.png)
+![Goink Logo](goink.png =250x)
 
 This package can be run at any go program root, and only tests incremental changes from a previous git commit.
 
