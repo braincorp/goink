@@ -7,7 +7,6 @@ import (
 	"go/build"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,9 +14,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type Module struct {
+	Path      string
+	Main      bool
+	Dir       string
+	GoMod     string
+	GoVersion string
+}
+
 type PackagePlusExtras struct {
 	build.Package
-	Deps []string
+	Deps   []string
+	Module Module
 }
 
 func GetCwd() string {
@@ -49,24 +57,29 @@ func goGit(ss ...string) []string {
 	if err != nil {
 		panic(err)
 	}
-	return strings.Split(strings.TrimSpace(string(data)), fmt.Sprintln())
+	t := []string{}
+	for _, r := range strings.Split(strings.TrimSpace(string(data)), fmt.Sprintln()) {
+		if r != "" {
+			t = append(t, r)
+		}
+	}
+	return t
 }
-func goTest(ss ...string) {
-	fmt.Println("go", "test", ss)
-	cmd := exec.Command("go", append([]string{"test"}, ss...)...)
+func goTest(flags string, ss ...string) {
+	fmt.Print("go ", "test ", flags)
+	fmt.Println(strings.Join(ss, " "))
+	cmd := exec.Command("go", append([]string{"test", flags}, ss...)...)
 	cmd.Stdout = os.Stdout
 	cmd.Dir = GetCwd()
 
-	err := cmd.Run()
-	if err != nil {
-		panic(err)
-	}
+	_ = cmd.Run()
 	return
 }
 func goList(ss ...string) ([]*PackagePlusExtras, error) {
 	r := append([]string{"list", "-f", "{}", "-json"}, ss...)
 	//fmt.Println("go", r)
 	cmd := exec.Command("go", r...)
+	cmd.Dir = GetCwd()
 	data, err := cmd.Output()
 	if err != nil {
 		panic(err)
@@ -82,19 +95,12 @@ func goList(ss ...string) ([]*PackagePlusExtras, error) {
 	}
 	return ret, nil
 }
-func GetCurrentPackage() string {
-	rs, err := goList()
-	if err != nil {
-		panic(err)
-	}
-	return rs[0].ImportPath
-}
 func GetGitChangedFiles(branch string) []string {
 	r := goGit("diff", goGit("merge-base", "--fork-point", branch)[0], "--name-only")
 
-	if len(r) == 0 {
+	if len(r) != 0 {
 		fmt.Println("changed files:")
-		fmt.Println(r)
+		fmt.Println(strings.Join(r, ","))
 		fmt.Println()
 	}
 	return r
@@ -121,13 +127,23 @@ func init() {
 	cmd.MarkFlagRequired("head")
 	cmd.Flags().StringSlice("entrypoints", []string{}, "entrypoints are the main packages that you will use to build your go binaries ")
 	cmd.MarkFlagRequired("entrypoints")
+	cmd.Flags().String("go-test-flags", "", "flags to pass when invoking go test. ")
+
 }
 
 var lock = sync.Mutex{}
 var packagesToTest = []string{}
 var seenPackages = map[string]bool{}
 
-func walkPackages(base string, packages []*PackagePlusExtras, changedPackages []string) {
+func walkPackage(pack *PackagePlusExtras, changedPackages []string) {
+	// if len(hash([]string{pack.ImportPath}, changedPackages)) == 0 {
+	// 	packagesToTest = append(packagesToTest, pack.ImportPath)
+	// }
+	walkPackagesInner(pack.Module.Path, []*PackagePlusExtras{pack}, changedPackages)
+	return
+}
+
+func walkPackagesInner(base string, packages []*PackagePlusExtras, changedPackages []string) {
 	next := []string{}
 	for _, p := range packages {
 		imports := p.Imports
@@ -151,17 +167,16 @@ func walkPackages(base string, packages []*PackagePlusExtras, changedPackages []
 		}
 		seenPackages[t.ImportPath] = true
 	}
-	walkPackages(base, t1, changedPackages)
+	walkPackagesInner(base, t1, changedPackages)
 }
 
 var cmd = cobra.Command{
 	Short: "test",
 	Run: func(cmd *cobra.Command, args []string) {
 		head, _ := cmd.Flags().GetString("head")
-		entrypoints, _ := cmd.Flags().GetStringSlice("entrypoints")
+		testFlags, _ := cmd.Flags().GetString("go-test-flags")
 
-		mainPackage := GetCurrentPackage()
-
+		entrypointsArg, _ := cmd.Flags().GetStringSlice("entrypoints")
 		// need to test all packages in this folder if they are dependent on the
 		// changed files. Convert the changed files into their respective packages (folders)
 		gitFiles := GetGitChangedFiles(head)
@@ -171,64 +186,45 @@ var cmd = cobra.Command{
 		}
 		changedDirectories := map[string]bool{}
 		for _, f := range gitFiles {
-			changedDirectories[path.Join(mainPackage, filepath.Dir(f))] = true
+			changedDirectories[filepath.Dir(f)] = true
 		}
-		// Convert from a hashmap to a list to pass parameters
-		changedDirVar := []string{}
-		for f := range changedDirectories {
-			changedDirVar = append(changedDirVar, f)
-		}
-		changedP, err := goList(changedDirVar...)
-		if err != nil {
-			panic(err)
-		}
-		changedModules := []string{}
-		for _, p := range changedP {
-			changedModules = append(changedModules, p.ImportPath)
-		}
+		for _, entrypoint := range entrypointsArg {
 
-		// the entrypoint files/folders need to be converted into directories, and then
-		// from directories, to packages
-		dirEntrypoints := []string{}
-		for _, e := range entrypoints {
-			dirEntrypoints = append(dirEntrypoints, path.Join(mainPackage, filepath.Dir(e)))
-		}
-		// convert directory entrypoints to packages entrypoints
-		d, err := goList(dirEntrypoints...)
-		if err != nil {
-			panic(err)
-		}
-		entrypointPackages := []*PackagePlusExtras{}
-		entrypointPackagesToTest := []string{}
-		entrypointTips := []bool{}
-		for i, r := range d {
-			if len(hash(changedModules, []string{r.ImportPath})) > 0 {
-				entrypointPackagesToTest = append(entrypointPackagesToTest, r.ImportPath)
+			// convert directory entrypoints to packages entrypoints
+			d, err := goList(entrypoint)
+			if err != nil {
+				panic(err)
 			}
+			entrypointPackage := d[0]
+
+			changedDirVar := []string{}
+			for f := range changedDirectories {
+				changedDirVar = append(changedDirVar, filepath.Join(entrypointPackage.Module.Path, f))
+			}
+			changedP, err := goList(changedDirVar...)
+			if err != nil {
+				panic(err)
+			}
+
+			changedModules := []string{}
+			for _, p := range changedP {
+				changedModules = append(changedModules, p.ImportPath)
+			}
+			fmt.Println("changed Modules", changedModules)
+
+			h := hash(changedModules, entrypointPackage.Deps)
+			if len(h) != 0 {
+				fmt.Printf("entrypoint %s has changed! \n", entrypoint)
+			}
+			packagesToTest = append(packagesToTest, changedModules...)
+
 			// so now we take our entrypoints and check if any of the dependencies have changed
-			h := hash(changedModules, r.Deps)
-			if len(h) == 0 {
-				entrypointTips = append(entrypointTips, false)
-			} else {
-				fmt.Printf("entrypoint %s has changed! \n", entrypoints[i])
-				entrypointPackagesToTest = append(entrypointPackagesToTest, r.ImportPath)
-			}
-			entrypointPackages = append(entrypointPackages, r)
+			walkPackage(entrypointPackage, changedModules)
 		}
-		if len(entrypointPackages) == 0 {
-			fmt.Println("no updates :)")
-			return
-		}
-
-		walkPackages(mainPackage, entrypointPackages, changedModules)
 		// fmt.Println(GetCwd())
 		// fmt.Println()
 		// fmt.Println(GetImports("github.com/braincorp/roc_services/internal/services/devices"))
-		if len(packagesToTest) == 0 && len(entrypointPackagesToTest) == 0 {
-			fmt.Println("no updates :) ")
-			return
-		}
-		goTest(append(entrypointPackagesToTest, packagesToTest...)...)
+		goTest(testFlags, packagesToTest...)
 	},
 }
 
