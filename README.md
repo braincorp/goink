@@ -21,11 +21,13 @@ It then only tests the changed packages and their dependencies using `go test`. 
 find changed files -> find changed packages -> check main packages for dependency
 ```
 
-go Ink it!
-
 ### Why go list
 Some similar packages use the "go/build" build context to walk the AST tree as if we were compiling the program. On the other hand, I decided to call out to `go list`. To me, this is the prefered method since the parralalization is handled by `go list` and `go list` is fast. The multi depth dependencies are also resolved and stored so I can check packages for dependencies without walking. There was no reason to reimpliment `go list`.
 
 ### Similar Projects
 
 https://github.com/kisielk/godepgraph (uses the internal "go/build" package to import)
+
+
+
+Have fun, and go Ink it! :)
