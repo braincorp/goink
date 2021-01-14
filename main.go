@@ -165,6 +165,10 @@ var cmd = cobra.Command{
 		// need to test all packages in this folder if they are dependent on the
 		// changed files. Convert the changed files into their respective packages (folders)
 		gitFiles := GetGitChangedFiles(head)
+		if len(gitFiles) == 0 {
+			fmt.Println("no files changed :)")
+			return
+		}
 		changedDirectories := map[string]bool{}
 		for _, f := range gitFiles {
 			changedDirectories[path.Join(mainPackage, filepath.Dir(f))] = true
